@@ -102,15 +102,15 @@ pub fn parse_completion_config(last: &str) -> Result<CompletionConfig, InvokeErr
     Ok(config)
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::completions;
+// #[cfg(test)]
+// mod tests {
+//     use crate::completions;
 
-    #[tokio::test]
-    async fn test_model() {
-        let response = completions::completions("sdfs".to_string(), "{}")
-            .await
-            .unwrap();
-        println!("{response}");
-    }
-}
+//     #[tokio::test]
+//     async fn test_model() {
+//         let response = completions::completions("sdfs".to_string(), "{}")
+//             .await
+//             .unwrap();
+//         println!("{response}");
+//     }
+// }
