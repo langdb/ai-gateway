@@ -51,7 +51,7 @@ impl Provider {
                         output_schema: None,
                     })
                 } else {
-                    Ok(CompletionEngineParams::LangdbOpen {
+                    Ok(CompletionEngineParams::Proxy {
                         params,
                         execution_options: Default::default(),
                         credentials: api_key_credentials,
