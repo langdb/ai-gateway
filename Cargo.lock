@@ -2684,6 +2684,7 @@ dependencies = [
  "indexmap 2.7.1",
  "langdb_clickhouse",
  "minijinja",
+ "once_cell",
  "openssh",
  "opentelemetry",
  "opentelemetry-proto",

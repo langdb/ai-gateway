@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -57,6 +58,10 @@ pub enum EvalError {
     JsonError(#[from] serde_json::Error),
 }
 
+thread_local! {
+    static RUNTIME: RefCell<Option<JsRuntime>> = const { RefCell::new(None) };
+}
+
 pub struct ScriptStrategy {}
 
 impl Default for ScriptStrategy {
@@ -78,8 +83,6 @@ impl ScriptStrategy {
         models: &AvailableModels,
         metrics: &BTreeMap<String, ProviderMetrics>,
     ) -> Result<serde_json::Value, ScriptError> {
-        let mut runtime = JsRuntime::new(RuntimeOptions::default());
-
         // Create a secure context with limited globals
         let code = format!(
             "(() => {{ 
@@ -120,7 +123,14 @@ impl ScriptStrategy {
         let start = Instant::now();
         let timeout = Duration::from_secs(30);
 
-        let result = eval(&mut runtime, code);
+        let result = RUNTIME.with(|runtime_cell| {
+            let mut runtime_ref = runtime_cell.borrow_mut();
+            if runtime_ref.is_none() {
+                *runtime_ref = Some(JsRuntime::new(RuntimeOptions::default()));
+            }
+
+            eval(runtime_ref.as_mut().unwrap(), code)
+        });
 
         if start.elapsed() > timeout {
             return Err(ScriptError::ExecutionError(

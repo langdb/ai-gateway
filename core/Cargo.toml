@@ -80,6 +80,7 @@ async-mcp = "0.0.6"
 parking_lot = "0.12.3"
 rand = "0.8.5"
 deno_core = "0.339.0"
+once_cell = "1.19.0"
 
 [features]
 default = ["database"]
