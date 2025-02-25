@@ -1,7 +1,6 @@
-use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Once;
 use std::time::{Duration, Instant};
 
 use deno_core::error::CoreError;
@@ -59,15 +58,22 @@ pub enum EvalError {
     JsonError(#[from] serde_json::Error),
 }
 
-const POOL_SIZE: usize = 3;
-static RUNTIME_INDEX: AtomicUsize = AtomicUsize::new(0);
+static V8_INIT: Once = Once::new();
+static mut V8_PLATFORM: Option<v8::SharedRef<v8::Platform>> = None;
 
-thread_local! {
-    static RUNTIME_POOL: RefCell<Vec<Option<JsRuntime>>> = {
-        let mut pool = Vec::with_capacity(POOL_SIZE);
-        pool.resize_with(POOL_SIZE, || None);
-        RefCell::new(pool)
-    };
+fn init_v8() -> v8::SharedRef<v8::Platform> {
+    V8_INIT.call_once(|| {
+        let platform = v8::Platform::new(0, false).make_shared();
+        v8::V8::initialize_platform(platform.clone());
+        v8::V8::initialize();
+        unsafe {
+            V8_PLATFORM = Some(platform);
+        }
+    });
+    #[allow(static_mut_refs)]
+    unsafe {
+        V8_PLATFORM.clone().unwrap()
+    }
 }
 
 pub struct ScriptStrategy {}
@@ -91,6 +97,17 @@ impl ScriptStrategy {
         models: &AvailableModels,
         metrics: &BTreeMap<String, ProviderMetrics>,
     ) -> Result<serde_json::Value, ScriptError> {
+        // Initialize V8 platform if needed
+        let platform = init_v8();
+
+        // Create a new runtime with minimal options
+        let options = RuntimeOptions {
+            v8_platform: Some(platform),
+            ..Default::default()
+        };
+
+        let mut runtime = JsRuntime::new(options);
+
         // Create a secure context with limited globals
         let code = format!(
             "(() => {{ 
@@ -127,39 +144,20 @@ impl ScriptStrategy {
             serde_json::to_string(metrics)?,
         );
 
-        // Get next runtime index using round-robin
-        let runtime_idx = RUNTIME_INDEX.fetch_add(1, Ordering::SeqCst) % POOL_SIZE;
-
         // Execute the script with a timeout check
         let start = Instant::now();
         let timeout = Duration::from_secs(30);
-        
-        let result = RUNTIME_POOL.with(|pool| {
-            let mut pool = pool.borrow_mut();
-            
-            // Initialize runtime if needed
-            if pool[runtime_idx].is_none() {
-                pool[runtime_idx] = Some(JsRuntime::new(RuntimeOptions::default()));
-            }
 
-            // Get a mutable reference to the runtime
-            let runtime = pool[runtime_idx].as_mut().unwrap();
+        let result = eval(&mut runtime, code);
 
-            // Reset runtime if it's been used too many times
-            if runtime_idx == 0 && RUNTIME_INDEX.load(Ordering::SeqCst) > POOL_SIZE * 20 {
-                // Reset counter
-                RUNTIME_INDEX.store(0, Ordering::SeqCst);
-                
-                // Create fresh runtime
-                *runtime = JsRuntime::new(RuntimeOptions::default());
-            }
-
-            eval(runtime, code)
-        });
-        
         if start.elapsed() > timeout {
-            return Err(ScriptError::ExecutionError("Script execution timed out".to_string()));
+            return Err(ScriptError::ExecutionError(
+                "Script execution timed out".to_string(),
+            ));
         }
+
+        // Explicitly drop the runtime
+        drop(runtime);
 
         result.map_err(Into::into)
     }
