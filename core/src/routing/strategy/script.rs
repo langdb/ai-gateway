@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use deno_core::error::CoreError;
 use deno_core::serde_v8;
 use deno_core::v8;
-use deno_core::Extension;
 use deno_core::JsRuntime;
 use deno_core::RuntimeOptions;
 
@@ -59,39 +59,26 @@ pub enum EvalError {
 
 pub struct ScriptStrategy {}
 
+impl Default for ScriptStrategy {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ScriptStrategy {
+    pub fn new() -> Self {
+        Self {}
+    }
+
     pub fn run(
+        &self,
         script: &str,
         request: &ChatCompletionRequest,
         headers: &HashMap<String, String>,
         models: &AvailableModels,
         metrics: &BTreeMap<String, ProviderMetrics>,
     ) -> Result<serde_json::Value, ScriptError> {
-        // Configure runtime options with security constraints and memory limits
-        let create_params = v8::CreateParams::default().heap_limits(0, 64 * 1024 * 1024); // Set max heap to 64MB
-
-        let options = RuntimeOptions {
-            extensions: vec![Extension {
-                name: "routing",
-                ops: vec![].into(),
-                js_files: vec![].into(),
-                esm_files: vec![].into(),
-                esm_entry_point: None,
-                lazy_loaded_esm_files: vec![].into(),
-                enabled: true,
-                ..Default::default()
-            }],
-            module_loader: None,    // Disable module loading
-            startup_snapshot: None, // No startup snapshot
-            shared_array_buffer_store: None,
-            create_params: Some(create_params),
-            v8_platform: None,
-            inspector: false, // Disable inspector
-            skip_op_registration: false,
-            ..Default::default()
-        };
-
-        let mut runtime = JsRuntime::new(options);
+        let mut runtime = JsRuntime::new(RuntimeOptions::default());
 
         // Create a secure context with limited globals
         let code = format!(
@@ -129,11 +116,17 @@ impl ScriptStrategy {
             serde_json::to_string(metrics)?,
         );
 
-        // Execute the script
+        // Execute the script with a timeout
+        let start = Instant::now();
+        let timeout = Duration::from_secs(30);
+
         let result = eval(&mut runtime, code);
 
-        // Explicitly drop the runtime to free V8 resources
-        drop(runtime);
+        if start.elapsed() > timeout {
+            return Err(ScriptError::ExecutionError(
+                "Script execution timed out".to_string(),
+            ));
+        }
 
         result.map_err(Into::into)
     }

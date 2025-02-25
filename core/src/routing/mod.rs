@@ -148,8 +148,9 @@ impl RouteStrategy for LlmRouter {
                 Ok(vec![target])
             }
             RoutingStrategy::Script { script } => {
+                let strategy = ScriptStrategy::new();
                 let result =
-                    ScriptStrategy::run(script, &request, &headers, available_models, &metrics)?;
+                    strategy.run(script, &request, &headers, available_models, &metrics)?;
 
                 let r = serde_json::from_value(result)
                     .map_err(RouterError::FailedToDeserializeRequestResult)?;
