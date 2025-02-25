@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use deno_core::error::CoreError;
@@ -58,8 +59,15 @@ pub enum EvalError {
     JsonError(#[from] serde_json::Error),
 }
 
+const POOL_SIZE: usize = 3;
+static RUNTIME_INDEX: AtomicUsize = AtomicUsize::new(0);
+
 thread_local! {
-    static RUNTIME: RefCell<Option<JsRuntime>> = const { RefCell::new(None) };
+    static RUNTIME_POOL: RefCell<Vec<Option<JsRuntime>>> = {
+        let mut pool = Vec::with_capacity(POOL_SIZE);
+        pool.resize_with(POOL_SIZE, || None);
+        RefCell::new(pool)
+    };
 }
 
 pub struct ScriptStrategy {}
@@ -91,7 +99,7 @@ impl ScriptStrategy {
                 const safeProps = ['Object', 'Array', 'Number', 'String', 'Boolean', 'Math', 'JSON'];
                 safeProps.forEach(prop => {{ secureGlobals[prop] = globalThis[prop]; }});
                 
-                // Add our script in a secure wrapper with timeout
+                // Add our script in a secure wrapper
                 const router = (context) => {{
                     'use strict';
                     try {{
@@ -119,23 +127,38 @@ impl ScriptStrategy {
             serde_json::to_string(metrics)?,
         );
 
-        // Execute the script with a timeout
+        // Get next runtime index using round-robin
+        let runtime_idx = RUNTIME_INDEX.fetch_add(1, Ordering::SeqCst) % POOL_SIZE;
+
+        // Execute the script with a timeout check
         let start = Instant::now();
         let timeout = Duration::from_secs(30);
-
-        let result = RUNTIME.with(|runtime_cell| {
-            let mut runtime_ref = runtime_cell.borrow_mut();
-            if runtime_ref.is_none() {
-                *runtime_ref = Some(JsRuntime::new(RuntimeOptions::default()));
+        
+        let result = RUNTIME_POOL.with(|pool| {
+            let mut pool = pool.borrow_mut();
+            
+            // Initialize runtime if needed
+            if pool[runtime_idx].is_none() {
+                pool[runtime_idx] = Some(JsRuntime::new(RuntimeOptions::default()));
             }
 
-            eval(runtime_ref.as_mut().unwrap(), code)
-        });
+            // Get a mutable reference to the runtime
+            let runtime = pool[runtime_idx].as_mut().unwrap();
 
+            // Reset runtime if it's been used too many times
+            if runtime_idx == 0 && RUNTIME_INDEX.load(Ordering::SeqCst) > POOL_SIZE * 20 {
+                // Reset counter
+                RUNTIME_INDEX.store(0, Ordering::SeqCst);
+                
+                // Create fresh runtime
+                *runtime = JsRuntime::new(RuntimeOptions::default());
+            }
+
+            eval(runtime, code)
+        });
+        
         if start.elapsed() > timeout {
-            return Err(ScriptError::ExecutionError(
-                "Script execution timed out".to_string(),
-            ));
+            return Err(ScriptError::ExecutionError("Script execution timed out".to_string()));
         }
 
         result.map_err(Into::into)
