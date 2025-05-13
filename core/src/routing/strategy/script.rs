@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 
-use boa_engine::{Context, JsError, Source};
+use quick_js::{Context, ContextError, ExecutionError};
 
 use crate::handler::AvailableModels;
+use crate::routing::strategy::js_value_to_json;
 use crate::types::gateway::ChatCompletionRequest;
 use crate::usage::ProviderMetrics;
 
@@ -14,17 +15,11 @@ pub enum ScriptError {
     #[error("Failed to serialize JSON: {0}")]
     SerializationError(#[from] serde_json::Error),
 
-    #[error("Script execution failed: {0}")]
-    ExecutionError(String),
-
-    #[error("Memory limit exceeded")]
-    MemoryLimitExceeded,
-
-    #[error("Invalid return value: {0}")]
-    InvalidReturnValue(String),
-
     #[error("JavaScript error: {0}")]
-    JsError(#[from] JsError),
+    JsContextError(#[from] ContextError),
+
+    #[error("JavaScript execution error: {0}")]
+    JsExecutionError(#[from] ExecutionError),
 }
 
 pub struct ScriptStrategy {}
@@ -74,12 +69,20 @@ impl ScriptStrategy {
             serde_json::to_string(metrics)?,
         );
 
-        let mut context = Context::default();
-        let result = context.eval(Source::from_bytes(&code))?;
+        let context = Context::new()?;
+        let result = context.eval(&code)?;
 
         let duration = start_time.elapsed();
         tracing::warn!("Script execution time: {} ms", duration.as_millis());
 
-        Ok(result.to_json(&mut context)?)
+        let value: serde_json::Value = js_value_to_json(&result);
+
+        let duration = start_time.elapsed();
+        tracing::warn!(
+            "Script execution + Conversion time: {} ms",
+            duration.as_millis()
+        );
+
+        Ok(value)
     }
 }
