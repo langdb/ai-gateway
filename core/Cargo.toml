@@ -76,7 +76,7 @@ async-mcp = { git = "https://github.com/karolisg/async-mcp.git", rev = "188f5a09
 parking_lot = "0.12.3"
 rand = "0.8.5"
 url = "2.5.4"
-# deno_core = "0.334.0"
+boa_engine = "0.19.0"
 
 [features]
 default = ["database"]
