@@ -1,3 +1,4 @@
+use crate::error::GatewayError;
 use crate::executor::chat_completion::stream_executor::stream_chunks;
 use crate::handler::{find_model_by_full_name, ModelEventWithDetails};
 use crate::llm_gateway::message_mapper::MessageMapper;
@@ -66,7 +67,9 @@ pub async fn execute<T: Serialize + DeserializeOwned + Debug + Clone>(
     }
 
     let mcp_tools = match &request_with_tools.mcp_servers {
-        Some(tools) => get_tools(tools).await?,
+        Some(tools) => get_tools(tools)
+            .await
+            .map_err(|e| GatewayError::McpServerError(Box::new(e)))?,
         None => Vec::new(),
     };
 
