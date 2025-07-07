@@ -1,6 +1,5 @@
 #[cfg(feature = "database")]
 pub mod database;
-pub mod span;
 
 use crate::types::GatewayTenant;
 use std::collections::HashMap;
@@ -422,7 +421,10 @@ impl TraceService for TraceServiceImpl {
                         if let Some((sender, _)) =
                             self.project_trace_senders.get(project_id).as_deref()
                         {
-                            let _ = sender.send(span.clone());
+                            match sender.send(span.clone()) {
+                                Ok(_) => {}
+                                Err(e) => tracing::error!("Traces send error: {}", e.to_string()),
+                            }
                         }
                     }
                     self.writer_sender.send(span).await.unwrap();
