@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::executor::chat_completion::execute;
-use crate::routing::RouteStrategy;
+use crate::routing::{RouteStrategy, InMemoryMetricsRepository};
 use crate::types::gateway::ChatCompletionRequestWithTools;
 
 use crate::GatewayError;
@@ -106,12 +106,15 @@ impl RoutedExecutor {
                     None => BTreeMap::new(),
                 };
 
+                // Create metrics repository from the fetched metrics
+                let metrics_repository = InMemoryMetricsRepository::new(metrics);
+
                 let executor_result = llm_router
                     .route(
                         request.request.clone(),
                         &executor_context.provided_models,
                         executor_context.headers.clone(),
-                        metrics,
+                        &metrics_repository,
                     )
                     .instrument(span.clone())
                     .await;
