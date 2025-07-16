@@ -203,6 +203,8 @@ pub async fn execute_mcp_tool(
     }
     let name = tool.name.clone();
 
+    tracing::info!("MCP def: {:#?}", def);
+    
     let client = get_transport(def).await?;
 
     let mut args = serde_json::Map::new();
