@@ -78,6 +78,7 @@ pub fn stdio() -> (tokio::io::Stdin, tokio::io::Stdout) {
 pub async fn get_transport(
     definition: &McpDefinition,
 ) -> Result<RunningService<RoleClient, Box<dyn DynService<RoleClient>>>, McpServerError> {
+    tracing::info!("Getting transport for definition: {:#?}", definition);
     match &definition.r#type {
         McpTransportType::Sse { server_url, .. } => {
             let transport = SseClientTransport::start(server_url.clone()).await?;
@@ -204,7 +205,7 @@ pub async fn execute_mcp_tool(
     let name = tool.name.clone();
 
     tracing::info!("MCP def: {:#?}", def);
-    
+
     let client = get_transport(def).await?;
 
     let mut args = serde_json::Map::new();
