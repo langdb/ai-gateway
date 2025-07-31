@@ -1,7 +1,7 @@
 use crate::routing::interceptor::{InterceptorFactory, LazyInterceptorManager};
 use crate::routing::{
     strategy::conditional::evaluator::{
-        evaluate_conditions_lazy, referenced_pre_request_interceptors,
+        evaluate_conditions, referenced_pre_request_interceptors,
     },
     ConditionalRouting, TargetSpec,
 };
@@ -20,9 +20,9 @@ impl ConditionalRouter {
         request: &crate::types::gateway::ChatCompletionRequest,
         headers: &std::collections::HashMap<String, String>,
         metadata: &std::collections::HashMap<String, serde_json::Value>,
+        extra: Option<&crate::types::gateway::Extra>,
     ) -> Option<&TargetSpec> {
         let referenced = referenced_pre_request_interceptors(&self.routing.routes);
-        tracing::warn!("Referenced interceptors: {:#?}", referenced);
 
         // Create interceptors map for lazy execution
         let mut interceptors = std::collections::HashMap::new();
@@ -41,14 +41,17 @@ impl ConditionalRouter {
             request.clone(),
             headers.clone(),
             state.clone(),
-        );
+        )
+        .with_extra(extra.cloned());
 
         // Create lazy interceptor manager
         let mut lazy_manager = LazyInterceptorManager::new(interceptors, context);
 
         // Evaluate routes in order with lazy interceptor execution
         for route in &self.routing.routes {
-            match evaluate_conditions_lazy(&route.conditions, &mut lazy_manager, metadata).await {
+            match evaluate_conditions(&route.conditions, &mut lazy_manager, metadata, extra)
+                .await
+            {
                 Ok(true) => {
                     if let Some(targets) = &route.targets {
                         return Some(targets);
@@ -165,6 +168,7 @@ mod tests {
                 &ChatCompletionRequest::default(),
                 &HashMap::new(),
                 &HashMap::new(),
+                None,
             )
             .await;
         assert!(target.is_some());
@@ -209,6 +213,7 @@ mod tests {
                 &ChatCompletionRequest::default(),
                 &HashMap::new(),
                 &HashMap::new(),
+                None,
             )
             .await;
         assert!(target.is_none());
@@ -244,6 +249,7 @@ mod tests {
                 &ChatCompletionRequest::default(),
                 &HashMap::new(),
                 &metadata,
+                None,
             )
             .await;
         assert!(target.is_some());
@@ -306,6 +312,7 @@ mod tests {
                 &ChatCompletionRequest::default(),
                 &HashMap::new(),
                 &metadata,
+                None,
             )
             .await;
         assert!(target.is_some());
@@ -350,6 +357,7 @@ mod tests {
                 &ChatCompletionRequest::default(),
                 &HashMap::new(),
                 &HashMap::new(),
+                None,
             )
             .await;
         assert!(target.is_none());
@@ -410,16 +418,17 @@ mod tests {
         };
         let router = ConditionalRouter { routing };
         let factory = Box::new(MockFactory { result: true }) as Box<dyn InterceptorFactory>;
-        
+
         let target = router
             .get_target(
                 factory,
                 &ChatCompletionRequest::default(),
                 &HashMap::new(),
                 &HashMap::new(),
+                None,
             )
             .await;
-        
+
         assert!(target.is_some());
         if let Some(TargetSpec::List(targets)) = target {
             assert_eq!(targets[0]["model"], "first/model");
