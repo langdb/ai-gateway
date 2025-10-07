@@ -28,6 +28,7 @@ pub use dashmap;
 
 pub mod usage;
 
+pub use async_openai;
 pub use bytes;
 use types::guardrails::GuardError;
 

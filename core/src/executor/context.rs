@@ -15,7 +15,7 @@ use crate::routing::interceptor::RouterInterceptorFactory;
 
 #[derive(Clone)]
 pub struct ExecutorContext {
-    pub callbackhandler: CallbackHandlerFn,
+    pub callback_handler: CallbackHandlerFn,
     pub cost_calculator: Arc<Box<dyn CostCalculator>>,
     pub tags: HashMap<String, String>,
     pub metadata: HashMap<String, serde_json::Value>,
@@ -32,7 +32,7 @@ unsafe impl Sync for ExecutorContext {}
 
 impl ExecutorContext {
     pub fn new(
-        callbackhandler: CallbackHandlerFn,
+        callback_handler: CallbackHandlerFn,
         cost_calculator: Arc<Box<dyn CostCalculator>>,
         model_metadata_factory: Arc<Box<dyn ModelMetadataFactory>>,
         req: &HttpRequest,
@@ -46,7 +46,7 @@ impl ExecutorContext {
         let providers_config = req.app_data::<ProvidersConfig>().cloned();
 
         Ok(Self {
-            callbackhandler,
+            callback_handler,
             cost_calculator,
             model_metadata_factory,
             tags,
