@@ -308,6 +308,7 @@ pub enum ContentType {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Hash, PartialEq, Eq, Default)]
 pub struct Content {
+    #[serde(default)]
     pub r#type: ContentType,
     pub text: Option<String>,
     pub image_url: Option<ImageUrl>,
@@ -461,9 +462,17 @@ pub struct ChatModel {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionParameters {
+    #[serde(default = "default_type")]
     pub r#type: String,
+    #[serde(default)]
     pub properties: HashMap<String, Property>,
     pub required: Option<Vec<String>>,
+    #[serde(flatten)]
+    pub additional_fields: HashMap<String, serde_json::Value>,
+}
+
+fn default_type() -> String {
+    "object".to_string()
 }
 
 impl Default for FunctionParameters {
@@ -472,17 +481,21 @@ impl Default for FunctionParameters {
             r#type: "object".to_owned(),
             properties: Default::default(),
             required: Some(vec![]),
+            additional_fields: Default::default(),
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Property {
+    #[serde(default)]
     pub r#type: PropertyType,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub items: Option<Box<Property>>,
+    #[serde(flatten)]
+    pub additional_fields: HashMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -490,6 +503,12 @@ pub struct Property {
 pub enum PropertyType {
     Single(String),
     List(Vec<String>),
+}
+
+impl Default for PropertyType {
+    fn default() -> Self {
+        PropertyType::Single(String::new())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

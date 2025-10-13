@@ -1,8 +1,11 @@
 use crate::telemetry::events::JsonValue;
 use actix_web::dev::forward_ready;
 use actix_web::{
-    dev::{Service, ServiceRequest, ServiceResponse, Transform},
+    dev::{Service, ServiceRequest, ServiceResponse, Transform, Payload},
     Error,
+    HttpMessage,
+    web::Bytes,
+    error::PayloadError,
 };
 use std::collections::HashMap;
 use std::future::{ready, Future, Ready};
@@ -11,6 +14,7 @@ use std::rc::Rc;
 use tracing::{field, Span};
 use tracing_futures::Instrument;
 use valuable::Valuable;
+use futures::stream::StreamExt;
 
 use actix_web::HttpRequest;
 
@@ -83,15 +87,39 @@ where
 
     forward_ready!(service);
 
-    fn call(&self, req: ServiceRequest) -> Self::Future {
+    fn call(&self, mut req: ServiceRequest) -> Self::Future {
         let service = Rc::clone(&self.service);
 
         Box::pin(async move {
+            // Extract and log body without consuming it
+            let mut body = Bytes::new();
+            let mut stream = req.take_payload();
+            let mut chunks = Vec::new();
+
+            while let Some(chunk) = stream.next().await {
+                match chunk {
+                    Ok(chunk) => {
+                        chunks.push(chunk.clone());
+                        body = Bytes::from([body, chunk].concat());
+                    },
+                    Err(_) => break,
+                }
+            }
+
+            let body_string = String::from_utf8_lossy(&body).to_string();
+
+            // Reconstruct the payload from the collected chunks
+            let new_payload_stream = futures::stream::iter(chunks.into_iter().map(Ok::<_, PayloadError>));
+            req.set_payload(Payload::Stream {
+                payload: Box::pin(new_payload_stream),
+            });
+
             let span = tracing::info_span!(
                 target: "langdb::user_tracing::cloud_api",
                 "cloud_api_invoke",
                 http.request.method = req.method().to_string(),
                 http.request.path = req.path().to_string(),
+                http.request.body = body_string,
                 http.request.header = JsonValue(
                     &serde_json::to_value(
                         req.headers()

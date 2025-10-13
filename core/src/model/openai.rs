@@ -49,6 +49,65 @@ use tracing::Instrument;
 use tracing::Span;
 use valuable::Valuable;
 
+/// Sanitize JSON Schema to be OpenAI-compatible by removing unsupported fields
+fn sanitize_schema_for_openai(mut schema: Value) -> Value {
+    if let Some(obj) = schema.as_object_mut() {
+        // Handle anyOf by extracting the first non-null type
+        if let Some(any_of) = obj.remove("anyOf") {
+            if let Some(any_of_array) = any_of.as_array() {
+                // Find the first non-null type option
+                for option in any_of_array {
+                    if let Some(option_obj) = option.as_object() {
+                        if let Some(type_val) = option_obj.get("type") {
+                            if type_val.as_str() != Some("null") {
+                                // Use this type and merge other fields
+                                if let Some(type_str) = type_val.as_str() {
+                                    obj.insert("type".to_string(), Value::String(type_str.to_string()));
+                                }
+                                // Merge other fields like enum, items
+                                if let Some(enum_val) = option_obj.get("enum") {
+                                    obj.insert("enum".to_string(), enum_val.clone());
+                                }
+                                if let Some(items_val) = option_obj.get("items") {
+                                    obj.insert("items".to_string(), items_val.clone());
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Remove other unsupported fields
+        obj.remove("oneOf");
+        obj.remove("allOf");
+        obj.remove("default");
+
+        // Remove empty type fields
+        if let Some(type_val) = obj.get("type") {
+            if type_val.as_str() == Some("") {
+                obj.remove("type");
+            }
+        }
+
+        // Recursively sanitize properties
+        if let Some(properties) = obj.get_mut("properties") {
+            if let Some(props_obj) = properties.as_object_mut() {
+                for (_, prop_value) in props_obj.iter_mut() {
+                    *prop_value = sanitize_schema_for_openai(prop_value.clone());
+                }
+            }
+        }
+
+        // Recursively sanitize items (for arrays)
+        if let Some(items) = obj.get_mut("items") {
+            *items = sanitize_schema_for_openai(items.clone());
+        }
+    }
+    schema
+}
+
 pub type StreamExecutionResult = (
     FinishReason,
     Vec<ChatCompletionMessageToolCall>,
@@ -296,7 +355,12 @@ impl<C: Config> OpenAIModel<C> {
                                     s.required = Some(vec![]);
                                 }
 
-                                serde_json::to_value(s)
+                                // Convert to JSON and sanitize for OpenAI compatibility
+                                let schema_value = serde_json::to_value(s)?;
+                                tracing::info!("Original schema for {}: {}", name, serde_json::to_string(&schema_value).unwrap_or_default());
+                                let sanitized = sanitize_schema_for_openai(schema_value);
+                                tracing::info!("Sanitized schema for {}: {}", name, serde_json::to_string(&sanitized).unwrap_or_default());
+                                Ok::<Value, serde_json::Error>(sanitized)
                             })
                             .transpose()?,
                         strict: Some(false),
