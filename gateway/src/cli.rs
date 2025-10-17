@@ -2,7 +2,6 @@ use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
-#[command(arg_required_else_help = true)]
 pub struct Cli {
     /// Optional config file path
     #[arg(short, long, default_value = "config.yaml")]
@@ -21,6 +20,10 @@ pub struct ServeArgs {
     /// Port to listen on (e.g., 8080)
     #[arg(long, value_name = "PORT")]
     pub port: Option<u16>,
+
+    /// Port to listen on (e.g., 8084)
+    #[arg(long, value_name = "UI_PORT")]
+    pub ui_port: Option<u16>,
 
     /// Comma-separated list of allowed CORS origins (e.g., http://localhost:3000,https://example.com)
     #[arg(long, value_name = "ORIGINS")]
@@ -53,20 +56,14 @@ pub struct ServeArgs {
     /// Maximum number of API calls per month (e.g., 100000)
     #[arg(long, value_name = "LIMIT")]
     pub rate_monthly: Option<u64>,
-
-    /// Start server in interactive mode with TUI interface
-    #[arg(short, long)]
-    pub interactive: bool,
 }
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Update the available models cache
-    Update {
-        /// Force update even if cache is fresh
-        #[arg(short, long)]
-        force: bool,
-    },
+    /// Sync models from API to database
+    Sync,
+    /// Sync providers from API to database
+    SyncProviders,
     /// List all available models
     List,
     /// Start the API server (default if no command specified)

@@ -1,13 +1,14 @@
-use langdb_core::events::{self, BaggageSpanProcessor};
+use langdb_core::telemetry::events::{self, BaggageSpanProcessor};
+use langdb_core::telemetry::ProjectTraceMap;
+use langdb_core::telemetry::ProjectTraceSpanExporter;
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_sdk::trace::SdkTracerProvider;
-use tokio::sync::mpsc::Sender;
+use std::sync::Arc;
 use tracing::level_filters::LevelFilter;
-use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Layer, Registry};
 
-pub fn init_tracing() {
+pub fn init_tracing(project_trace_senders: Arc<ProjectTraceMap>) {
     let log_level = std::env::var("RUST_LOG").unwrap_or("info".to_string());
     let env_filter = EnvFilter::new(log_level).add_directive("actix_server=off".parse().unwrap());
     let color = std::env::var("ANSI_OUTPUT").map_or(true, |v| v == "true");
@@ -27,8 +28,17 @@ pub fn init_tracing() {
         .with_tonic()
         .build()
         .unwrap();
+    let project_trace_span_exporter = ProjectTraceSpanExporter::new(project_trace_senders);
+
     let provider = SdkTracerProvider::builder()
-        .with_span_processor(BaggageSpanProcessor::new(["langdb.run_id", "langdb.label"]))
+        .with_span_processor(BaggageSpanProcessor::new([
+            "langdb.run_id",
+            "langdb.thread_id",
+            "langdb.label",
+            "langdb.tenant",
+            "langdb.project_id",
+        ]))
+        .with_simple_exporter(project_trace_span_exporter)
         .with_batch_exporter(otlp_exporter)
         .with_id_generator(events::UuidIdGenerator::default())
         .build();
@@ -41,58 +51,4 @@ pub fn init_tracing() {
         .with(otel_layer)
         .try_init()
         .expect("initialized subscriber successfully");
-}
-
-pub fn init_tui_tracing(sender: Sender<String>) {
-    // Set default log level if not set
-    if std::env::var("RUST_LOG").is_err() {
-        std::env::set_var("RUST_LOG", "info");
-    }
-
-    let sender_clone = sender.clone();
-    let make_writer = move || LogWriter {
-        sender: sender_clone.clone(),
-    };
-
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::new(
-                "langdb_core=off,ai_gateway::middleware::trace_logger=info,error",
-            )
-            .add_directive("ai_gateway::middleware::trace_logger=info".parse().unwrap())
-            .add_directive("langdb_gateway=off".parse().unwrap())
-            .add_directive("langdb_core=off".parse().unwrap())
-            .add_directive("actix_server=off".parse().unwrap()),
-        )
-        .with_span_events(FmtSpan::CLOSE)
-        .with_writer(make_writer)
-        .event_format(
-            tracing_subscriber::fmt::format()
-                .compact()
-                .without_time()
-                .with_ansi(false)
-                .with_target(false)
-                .with_level(true),
-        )
-        .init();
-}
-
-struct LogWriter {
-    sender: Sender<String>,
-}
-
-impl std::io::Write for LogWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        if let Ok(log) = String::from_utf8(buf.to_vec()) {
-            let sender = self.sender.clone();
-            tokio::spawn(async move {
-                sender.send(log).await.ok();
-            });
-        }
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
 }

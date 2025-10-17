@@ -2,8 +2,8 @@ name: Build AI Gateway
 
 on:
   push:
-    branches:
-      - main
+    tags:
+      - 'v*'
 
   workflow_dispatch:
 
@@ -18,7 +18,8 @@ permissions:
   contents: write # This is required for actions/checkout
 
 jobs:
-  build:
+  build-linux:
+    name: Build for Linux
     timeout-minutes: 60
     runs-on: ubuntu-22.04
 
@@ -44,15 +45,192 @@ jobs:
           toolchain: stable
       
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-x86_64
       
       - name: Build Gateway project
-        run: |
-          cargo build --release
+        run: cargo build --release --bin ai-gateway
           
       - name: Upload AI Gateway artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ai-gateway-binary
+          name: ai-gateway-linux-x86_64
           path: target/release/ai-gateway
           retention-days: 30
+
+  build-macos:
+    name: Build for macOS
+    timeout-minutes: 60
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        target: [x86_64-apple-darwin, aarch64-apple-darwin]
+
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Install dependencies
+        run: |
+          brew install postgresql sqlite3
+       
+      - name: Set library paths
+        run: |
+          echo "LIBRARY_PATH=$(brew --prefix)/lib:$LIBRARY_PATH" >> $GITHUB_ENV
+          echo "CPATH=$(brew --prefix)/include:$CPATH" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=$(brew --prefix)/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
+       
+      - name: Install stable
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          target: ${{ matrix.target }}
+      
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      
+      - name: Build Gateway project
+        env:
+          PQ_LIB_STATIC: "1"
+        run: cargo build --release --target ${{ matrix.target }} --bin ai-gateway
+          
+      - name: Upload AI Gateway artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-gateway-macos-${{ matrix.target == 'aarch64-apple-darwin' && 'aarch64' || 'x86_64' }}
+          path: target/${{ matrix.target }}/release/ai-gateway
+          retention-days: 30
+
+  create-release:
+    name: Create Release
+    needs: [build-linux, build-macos]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      
+      - name: Prepare release binaries
+        run: |
+          mkdir -p release
+          cp artifacts/ai-gateway-linux-x86_64/ai-gateway release/ai-gateway-linux-x86_64
+          cp artifacts/ai-gateway-macos-x86_64/ai-gateway release/ai-gateway-macos-x86_64
+          cp artifacts/ai-gateway-macos-aarch64/ai-gateway release/ai-gateway-macos-aarch64
+          chmod +x release/*
+          ls -lh release/
+      
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: ${{ contains(github.ref_name, '-prerelease') && format('Prerelease {0}', github.ref_name) || format('Release {0}', github.ref_name) }}
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-prerelease') }}
+          generate_release_notes: true
+          files: |
+            release/ai-gateway-linux-x86_64
+            release/ai-gateway-macos-x86_64
+            release/ai-gateway-macos-aarch64
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
             
+  update-homebrew-formula:
+    name: Update Homebrew formula
+    needs: create-release
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Git user
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Download release assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          mkdir -p release
+          gh release download "$TAG" -D release --pattern "ai-gateway-*"
+          ls -lh release
+
+      - name: Compute checksums
+        id: shas
+        run: |
+          LINUX_SHA=$(sha256sum release/ai-gateway-linux-x86_64 | awk '{print $1}')
+          MAC_X64_SHA=$(sha256sum release/ai-gateway-macos-x86_64 | awk '{print $1}')
+          MAC_ARM_SHA=$(sha256sum release/ai-gateway-macos-aarch64 | awk '{print $1}')
+          echo "linux=$LINUX_SHA" >> $GITHUB_OUTPUT
+          echo "mac_x64=$MAC_X64_SHA" >> $GITHUB_OUTPUT
+          echo "mac_arm=$MAC_ARM_SHA" >> $GITHUB_OUTPUT
+
+      - name: Update Homebrew formula file
+        env:
+          TAG: ${{ github.ref_name }}
+          LINUX_SHA: ${{ steps.shas.outputs.linux }}
+          MAC_X64_SHA: ${{ steps.shas.outputs.mac_x64 }}
+          MAC_ARM_SHA: ${{ steps.shas.outputs.mac_arm }}
+        run: |
+          VERSION="${TAG#v}"
+          BASE_VERSION="${VERSION%-*}"
+
+          # Update version line
+          sed -i -E 's/^(\s*version\s*").*(")/\1'"$BASE_VERSION"'\2/' Formula/ellora.rb
+
+          # Update URLs and corresponding sha256 lines
+          awk -v tag="$TAG" -v linux_sha="$LINUX_SHA" -v mac_x64_sha="$MAC_X64_SHA" -v mac_arm_sha="$MAC_ARM_SHA" '
+            BEGIN { next_sha="" }
+            {
+              if ($0 ~ /ai-gateway-macos-aarch64/ && $0 ~ /url "/) {
+                sub(/download\/[^"]+\/ai-gateway-macos-aarch64/, "download/" tag "/ai-gateway-macos-aarch64")
+                print
+                next_sha="MAC_ARM"
+                next
+              } else if ($0 ~ /ai-gateway-macos-x86_64/ && $0 ~ /url "/) {
+                sub(/download\/[^"]+\/ai-gateway-macos-x86_64/, "download/" tag "/ai-gateway-macos-x86_64")
+                print
+                next_sha="MAC_X64"
+                next
+              } else if ($0 ~ /ai-gateway-linux-x86_64/ && $0 ~ /url "/) {
+                sub(/download\/[^"]+\/ai-gateway-linux-x86_64/, "download/" tag "/ai-gateway-linux-x86_64")
+                print
+                next_sha="LINUX"
+                next
+              } else if (next_sha != "" && $0 ~ /^\s*sha256 "/) {
+                if (next_sha == "MAC_ARM") { sub(/sha256 ".*"/, "sha256 \"" mac_arm_sha "\"") }
+                if (next_sha == "MAC_X64") { sub(/sha256 ".*"/, "sha256 \"" mac_x64_sha "\"") }
+                if (next_sha == "LINUX")   { sub(/sha256 ".*"/, "sha256 \"" linux_sha "\"") }
+                print
+                next_sha=""
+                next
+              }
+              print
+            }
+          ' Formula/ellora.rb > Formula/ellora.rb.new
+          mv Formula/ellora.rb.new Formula/ellora.rb
+
+          echo "Preview of updated Formula/ellora.rb"
+          grep -nE 'version|ai-gateway-(macos|linux).*|sha256' Formula/ellora.rb || true
+
+      - name: Commit and push changes
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          if git diff --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git add Formula/ellora.rb
+          git commit -m "chore(homebrew): update formula for $TAG"
+          git push

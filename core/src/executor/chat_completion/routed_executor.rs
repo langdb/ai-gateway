@@ -1,8 +1,11 @@
 use crate::executor::chat_completion::basic_executor::BasicCacheContext;
 use crate::executor::context::ExecutorContext;
 use crate::handler::chat::map_sso_event;
+use crate::models::InferenceProvider;
+use crate::models::ModelMetadata;
 use crate::routing::metrics::InMemoryMetricsRepository;
 use crate::routing::RoutingStrategy;
+use crate::types::provider::InferenceModelProvider;
 use crate::usage::InMemoryStorage;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -32,8 +35,8 @@ use crate::routing::LlmRouter;
 use crate::telemetry::trace_id_uuid;
 use crate::GatewayApiError;
 
-use crate::events::JsonValue;
-use crate::events::SPAN_REQUEST_ROUTING;
+use crate::telemetry::events::JsonValue;
+use crate::telemetry::events::SPAN_REQUEST_ROUTING;
 use tracing::field;
 use valuable::Valuable;
 
@@ -62,6 +65,7 @@ impl RoutedExecutor {
         executor_context: &ExecutorContext,
         memory_storage: Option<Arc<Mutex<InMemoryStorage>>>,
         project_id: Option<&uuid::Uuid>,
+        thread_id: Option<&String>,
     ) -> Result<HttpResponse, GatewayApiError> {
         let span = Span::current();
 
@@ -142,7 +146,8 @@ impl RoutedExecutor {
                     }
                 }
             } else {
-                let result = Self::execute_request(&request, executor_context, project_id).await;
+                let result =
+                    Self::execute_request(&request, executor_context, project_id, thread_id).await;
 
                 match result {
                     Ok(response) => return Ok(response),
@@ -167,6 +172,7 @@ impl RoutedExecutor {
         request: &ChatCompletionRequestWithTools<RoutingStrategy>,
         executor_context: &ExecutorContext,
         project_id: Option<&uuid::Uuid>,
+        thread_id: Option<&String>,
     ) -> Result<HttpResponse, GatewayApiError> {
         let span = tracing::Span::current();
         span.record("request", &serde_json::to_string(&request)?);
@@ -174,10 +180,32 @@ impl RoutedExecutor {
 
         let model_name = request.request.model.clone();
 
-        let llm_model = executor_context
+        let llm_model = match executor_context
             .model_metadata_factory
             .get_model_metadata(&request.request.model, false, false, project_id)
-            .await?;
+            .await
+        {
+            Ok(model) => model,
+            Err(GatewayApiError::GatewayError(GatewayError::ModelError(_))) => {
+                let model_name = request.request.model.clone();
+                let model_parts = model_name.split('/').collect::<Vec<&str>>();
+                let provider = model_parts.first().expect("Provider should not be empty");
+                let model = model_parts.last().expect("Model should not be empty");
+                //Proxying model call without details
+                ModelMetadata {
+                    model: model.to_string(),
+                    inference_provider: InferenceProvider {
+                        provider: InferenceModelProvider::from(provider.to_string()),
+                        model_name: model.to_string(),
+                        endpoint: None,
+                    },
+                    ..Default::default()
+                }
+            }
+            Err(e) => {
+                return Err(e);
+            }
+        };
         let response = execute(
             request,
             executor_context,
@@ -190,13 +218,17 @@ impl RoutedExecutor {
         .await?;
 
         let mut response_builder = HttpResponse::Ok();
-        let builder = response_builder
+        let builder: &mut actix_web::HttpResponseBuilder = response_builder
             .insert_header(("X-Trace-Id", trace_id_uuid(trace_id).to_string()))
             .insert_header(("X-Model-Name", model_name.clone()))
             .insert_header((
                 "X-Provider-Name",
                 llm_model.inference_provider.provider.to_string(),
             ));
+
+        if let Some(thread_id) = thread_id {
+            builder.insert_header(("X-Thread-Id", thread_id.to_string()));
+        }
 
         match response {
             Left(result_stream) => {

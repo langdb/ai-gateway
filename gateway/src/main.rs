@@ -1,10 +1,13 @@
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
+use ::tracing::info;
+use axum::routing::get;
 use clap::Parser;
 use config::{Config, ConfigError};
 use http::ApiServer;
+use langdb_core::metadata::error::DatabaseError;
+use langdb_core::metadata::services::model::ModelServiceImpl;
 use langdb_core::{error::GatewayError, usage::InMemoryStorage};
-use run::models::{load_models, ModelsLoadError};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -13,17 +16,19 @@ mod cli;
 mod config;
 mod cost;
 mod guardrails;
+mod handlers;
 mod http;
 mod limit;
 mod middleware;
-mod otel;
 mod run;
+mod seed;
 mod session;
 mod tracing;
-mod tui;
 mod usage;
+use langdb_core::events::broadcast_channel_manager::BroadcastChannelManager;
+use static_serve::embed_asset;
+use static_serve::embed_assets;
 use tokio::sync::Mutex;
-use tui::{Counters, Tui};
 
 #[derive(Error, Debug)]
 pub enum CliError {
@@ -40,7 +45,11 @@ pub enum CliError {
     #[error(transparent)]
     ConfigError(#[from] ConfigError),
     #[error(transparent)]
-    ModelsError(#[from] ModelsLoadError),
+    DatabaseError(#[from] DatabaseError),
+    #[error(transparent)]
+    ModelsLoadError(#[from] run::models::ModelsLoadError),
+    #[error(transparent)]
+    ProvidersLoadError(#[from] run::providers::ProvidersLoadError),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,13 +63,13 @@ pub struct Credentials {
 }
 
 pub const LOGO: &str = r#"
-
-  ██       █████  ███    ██  ██████  ██████  ██████  
-  ██      ██   ██ ████   ██ ██       ██   ██ ██   ██ 
-  ██      ███████ ██ ██  ██ ██   ███ ██   ██ ██████  
-  ██      ██   ██ ██  ██ ██ ██    ██ ██   ██ ██   ██ 
-  ███████ ██   ██ ██   ████  ██████  ██████  ██████
+▗▄▄▄▖▗▖   ▗▖    ▗▄▖ ▗▄▄▖  ▗▄▖ 
+▐▌   ▐▌   ▐▌   ▐▌ ▐▌▐▌ ▐▌▐▌ ▐▌
+▐▛▀▀▘▐▌   ▐▌   ▐▌ ▐▌▐▛▀▚▖▐▛▀▜▌
+▐▙▄▄▖▐▙▄▄▖▐▙▄▄▖▝▚▄▞▘▐▌ ▐▌▐▌ ▐▌
 "#;
+
+embed_assets!("dist", compress = true);
 
 #[actix_web::main]
 async fn main() -> Result<(), CliError> {
@@ -70,106 +79,132 @@ async fn main() -> Result<(), CliError> {
 
     let cli = cli::Cli::parse();
 
+    let db_pool = init_db()?;
+
+    langdb_core::metadata::utils::init_db(&db_pool);
+
+    let project_trace_senders = Arc::new(BroadcastChannelManager::new(Default::default()));
+
+    let project_trace_senders_cleanup = Arc::clone(&project_trace_senders);
+    langdb_core::events::broadcast_channel_manager::start_cleanup_task(
+        (*project_trace_senders_cleanup).clone(),
+    );
+
+    tracing::init_tracing(project_trace_senders.inner().clone());
+    // Seed the database with a default project if none exist
+    seed::seed_database(&db_pool)?;
+
     match cli
         .command
         .unwrap_or(cli::Commands::Serve(cli::ServeArgs::default()))
     {
         cli::Commands::Login => session::login().await,
-        cli::Commands::Update { force } => {
-            tracing::init_tracing();
-            println!("Updating models{}...", if force { " (forced)" } else { "" });
-            let models = load_models(true).await?;
-            println!("{} Models updated successfully!", models.len());
+        cli::Commands::Sync => {
+            tracing::init_tracing(project_trace_senders.inner().clone());
+            info!("Syncing models from API to database...");
+            let models = run::models::fetch_and_store_models(db_pool.clone()).await?;
+            info!("Successfully synced {} models to database", models.len());
+            Ok(())
+        }
+        cli::Commands::SyncProviders => {
+            tracing::init_tracing(project_trace_senders.inner().clone());
+            info!("Syncing providers from API to database...");
+            run::providers::sync_providers(db_pool.clone()).await?;
+            info!("Successfully synced providers to database");
             Ok(())
         }
         cli::Commands::List => {
-            tracing::init_tracing();
-            println!("Available models:");
-            let models = load_models(false).await?;
+            tracing::init_tracing(project_trace_senders.inner().clone());
+            // Query models from database
+            use langdb_core::metadata::services::model::ModelService;
+            let model_service = ModelServiceImpl::new(db_pool.clone());
+            let db_models = model_service.list(None)?;
+
+            info!("Found {} models in database\n", db_models.len());
+
+            // Convert DbModel to ModelMetadata and display as table
+            let models: Vec<langdb_core::models::ModelMetadata> =
+                db_models.into_iter().map(|m| m.into()).collect();
+
             run::table::pretty_print_models(models);
             Ok(())
         }
         cli::Commands::Serve(serve_args) => {
-            if serve_args.interactive {
+            // Check if models table is empty and sync if needed
+            seed::seed_models(&db_pool).await?;
+
+            // Check if providers table is empty and sync if needed
+            seed::seed_providers(&db_pool).await?;
+
+            let config = Config::load(&cli.config)?;
+            let config = config.apply_cli_overrides(&cli::Commands::Serve(serve_args));
+
+            let backend_port = config.http.port;
+            let ui_port = config.ui.port;
+
+            let api_server = ApiServer::new(config, db_pool.clone());
+            let server_handle = tokio::spawn(async move {
                 let storage = Arc::new(Mutex::new(InMemoryStorage::new()));
-                let storage_clone = storage.clone();
-                let counters = Arc::new(RwLock::new(Counters::default()));
-                let counters_clone = counters.clone();
+                match api_server
+                    .start(Some(storage), project_trace_senders.clone())
+                    .await
+                {
+                    Ok(server) => server.await,
+                    Err(e) => Err(e),
+                }
+            });
 
-                let (log_sender, log_receiver) = tokio::sync::mpsc::channel(100);
-                tracing::init_tui_tracing(log_sender);
+            let frontend_handle = tokio::spawn(async move {
+                // Handler for serving VITE_BACKEND_PORT environment variable as plain text or JSON
+                let vite_backend_port_handler = move || async move {
+                    axum::Json(
+                        serde_json::json!({ "VITE_BACKEND_PORT": backend_port, "version": env!("CARGO_PKG_VERSION") }),
+                    )
+                };
 
-                let counter_handle =
-                    tokio::spawn(async move { Tui::spawn_counter_loop(storage, counters).await });
+                let index = embed_asset!("dist/index.html");
+                let router = static_router()
+                    .route("/api/env", get(vite_backend_port_handler))
+                    .fallback(index);
 
-                let config = Config::load(&cli.config)?;
-                let config = config.apply_cli_overrides(&cli::Commands::Serve(serve_args));
-                let api_server = ApiServer::new(config);
-                let models = load_models(false).await?;
-                let server_handle = tokio::spawn(async move {
-                    match api_server.start(models, Some(storage_clone)).await {
-                        Ok(server) => server.await,
-                        Err(e) => Err(e),
+                let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", ui_port)).await;
+                match listener {
+                    Ok(listener) => {
+                        axum::serve(listener, router.into_make_service())
+                            .await
+                            .unwrap();
                     }
-                });
-
-                let tui_handle = tokio::spawn(async move {
-                    let tui = Tui::new(log_receiver);
-                    if let Ok(mut tui) = tui {
-                        tui.run(counters_clone).await?;
-                    }
-                    Ok::<(), CliError>(())
-                });
-
-                // Create abort handles
-                let counter_abort = counter_handle.abort_handle();
-                let server_abort = server_handle.abort_handle();
-
-                tokio::select! {
-                    r = counter_handle => {
-                        if let Err(e) = r {
-                            eprintln!("Counter loop error: {e}");
-                        }
-                    }
-                    r = server_handle => {
-                        if let Err(e) = r {
-                            eprintln!("Server error: {e}");
-                        }
-                    }
-                    r = tui_handle => {
-                        if let Err(e) = r {
-                            eprintln!("TUI error: {e}");
-                        }
-                        // If TUI exits, abort other tasks
-                        counter_abort.abort();
-                        server_abort.abort();
+                    Err(e) => {
+                        eprintln!("Failed to bind frontend server to port 8084: {e}");
                     }
                 }
-            } else {
-                tracing::init_tracing();
+            });
 
-                let config = Config::load(&cli.config)?;
-                let config = config.apply_cli_overrides(&cli::Commands::Serve(serve_args));
-                let api_server = ApiServer::new(config);
-                let models = load_models(false).await?;
-                let server_handle = tokio::spawn(async move {
-                    let storage = Arc::new(Mutex::new(InMemoryStorage::new()));
-                    match api_server.start(models, Some(storage)).await {
-                        Ok(server) => server.await,
-                        Err(e) => Err(e),
+            tokio::select! {
+                r = server_handle => {
+                    if let Err(e) = r {
+                        eprintln!("Counter loop error: {e}");
                     }
-                });
-
-                match server_handle.await {
-                    Ok(result) => {
-                        if let Err(e) = result {
-                            eprintln!("{e}");
-                        }
+                }
+                r = frontend_handle => {
+                    if let Err(e) = r {
+                        eprintln!("Server error: {e}");
                     }
-                    Err(e) => eprintln!("{e}"),
                 }
             }
             Ok(())
         }
     }
+}
+
+fn init_db() -> Result<langdb_core::metadata::pool::DbPool, CliError> {
+    let home_dir = std::env::var("HOME").unwrap_or_else(|_| "~".to_string());
+    let ellora_dir = format!("{home_dir}/.ellora");
+    std::fs::create_dir_all(&ellora_dir).unwrap_or_default();
+    let ellora_db_file = format!("{ellora_dir}/ellora.sqlite");
+    let db_pool = langdb_core::metadata::pool::establish_connection(ellora_db_file, 10);
+
+    langdb_core::metadata::utils::init_db(&db_pool);
+
+    Ok(db_pool)
 }

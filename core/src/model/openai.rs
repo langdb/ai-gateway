@@ -6,13 +6,13 @@ use super::types::{
 };
 use super::{CredentialsIdent, ModelInstance};
 use crate::error::GatewayError;
-use crate::events::JsonValue;
-use crate::events::SPAN_OPENAI;
-use crate::events::{self, RecordResult};
 use crate::model::error::ModelFinishError;
 use crate::model::handler::handle_tool_call;
 use crate::model::types::LLMFirstToken;
 use crate::model::{async_trait, DEFAULT_MAX_RETRIES};
+use crate::telemetry::events::JsonValue;
+use crate::telemetry::events::SPAN_OPENAI;
+use crate::telemetry::events::{self, RecordResult};
 use crate::types::credentials::ApiKeyCredentials;
 use crate::types::engine::{ExecutionOptions, OpenAiModelParams, Prompt};
 use crate::types::gateway::{ChatCompletionContent, ChatCompletionMessage, ToolCall};
@@ -47,6 +47,7 @@ use std::sync::Arc;
 use tracing::field;
 use tracing::Instrument;
 use tracing::Span;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 use valuable::Valuable;
 
 pub type StreamExecutionResult = (
@@ -418,6 +419,7 @@ impl<C: Config> OpenAIModel<C> {
                 Ok(mut response) => {
                     if !first_response_received {
                         first_response_received = true;
+                        Span::current().add_event("llm.first_token", vec![]);
                         tx.send(Some(ModelEvent::new(
                             &Span::current(),
                             ModelEventType::LlmFirstToken(LLMFirstToken {}),

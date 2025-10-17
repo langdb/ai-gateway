@@ -1,8 +1,11 @@
-use crate::events::{JsonValue, RecordResult, SPAN_MODEL_CALL};
+use crate::events::CustomEventType;
 use crate::executor::context::ExecutorContext;
+use crate::metadata::services::model::ModelService;
 use crate::model::bedrock::BedrockModel;
 use crate::model::cached::CachedModel;
 use crate::model::error::ModelError;
+use crate::model::types::CustomEvent;
+use crate::telemetry::events::{JsonValue, RecordResult, SPAN_MODEL_CALL};
 use crate::types::engine::{CompletionEngineParams, CompletionModelParams};
 use crate::types::engine::{CompletionModelDefinition, ModelTools, ModelType};
 use crate::types::gateway::{
@@ -24,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fmt::Display;
+use std::sync::Arc;
 use tokio::sync::mpsc::{self, channel};
 use tools::Tool;
 use tracing::{info_span, Instrument};
@@ -409,6 +413,16 @@ impl<Inner: ModelInstance> ModelInstance for TracedModel<Inner> {
             span.record("cache", state.to_string());
         }
 
+        outer_tx
+            .send(Some(ModelEvent::new(
+                &span,
+                ModelEventType::Custom(CustomEvent::new(CustomEventType::SpanStart {
+                    operation_name: "model_call".to_string(),
+                    attributes: serde_json::json!({}),
+                })),
+            )))
+            .await?;
+
         apply_guardrails(
             &self.initial_messages,
             self.extra.as_ref(),
@@ -575,6 +589,16 @@ impl<Inner: ModelInstance> ModelInstance for TracedModel<Inner> {
         )
         .instrument(span.clone())
         .await?;
+
+        outer_tx
+            .send(Some(ModelEvent::new(
+                &span,
+                ModelEventType::Custom(CustomEvent::new(CustomEventType::SpanStart {
+                    operation_name: "model_call".to_string(),
+                    attributes: serde_json::json!({}),
+                })),
+            )))
+            .await?;
 
         async {
             let (tx, mut rx) = channel(outer_tx.max_capacity());
@@ -753,14 +777,12 @@ pub trait ModelMetadataFactory: Send + Sync {
 }
 
 pub struct DefaultModelMetadataFactory {
-    models: Vec<ModelMetadata>,
+    service: Arc<Box<dyn ModelService>>,
 }
 
 impl DefaultModelMetadataFactory {
-    pub fn new(models: &[ModelMetadata]) -> Self {
-        Self {
-            models: models.to_vec(),
-        }
+    pub fn new(service: Arc<Box<dyn ModelService>>) -> Self {
+        Self { service }
     }
 }
 
@@ -775,21 +797,14 @@ impl ModelMetadataFactory for DefaultModelMetadataFactory {
         _include_benchmark: bool,
         _project_id: Option<&uuid::Uuid>,
     ) -> Result<ModelMetadata, GatewayApiError> {
-        find_model_by_full_name(model_name, &self.models)
+        find_model_by_full_name(model_name, self.service.as_ref().as_ref())
     }
 
     async fn get_cheapest_model_metadata(
         &self,
-        model_names: &[String],
+        _model_names: &[String],
     ) -> Result<ModelMetadata, GatewayApiError> {
-        let models = self
-            .models
-            .clone()
-            .into_iter()
-            .filter(|m| model_names.contains(&m.model.clone()))
-            .collect::<Vec<ModelMetadata>>();
-
-        get_cheapest_model_metadata(&models)
+        unimplemented!()
     }
 
     async fn get_models_by_name(
